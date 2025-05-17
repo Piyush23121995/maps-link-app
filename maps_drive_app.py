@@ -17,18 +17,8 @@ credentials = service_account.Credentials.from_service_account_info(
     service_account_info, scopes=SCOPES)
 drive_service = build('drive', 'v3', credentials=credentials)
 
-# Replace with your shared folder name
-SHARED_FOLDER_NAME = "Maps Input"
-
-@st.cache_data
-def get_folder_id(folder_name):
-    response = drive_service.files().list(q=f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'",
-                                          spaces='drive').execute()
-    folders = response.get('files', [])
-    if not folders:
-        st.error("❌ Shared folder not found.")
-        return None
-    return folders[0]['id']
+# Use folder ID directly
+FOLDER_ID = st.secrets["GDRIVE_FOLDER_ID"]
 
 @st.cache_data
 def list_files(folder_id):
@@ -55,38 +45,34 @@ def upload_to_drive(df, original_name, folder_id):
     output = io.BytesIO()
     df.to_excel(output, index=False, engine='openpyxl')
     output.seek(0)
-    media = MediaIoBaseDownload(io.BytesIO(output.read()), None)
+    media = MediaFileUpload(io.BytesIO(output.getvalue()), mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     file_metadata = {
         'name': f"{original_name}_with_links.xlsx",
         'parents': [folder_id]
     }
-    media = MediaFileUpload(io.BytesIO(output.getvalue()), mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     new_file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
     return new_file.get('id')
 
 # App Logic
-folder_id = get_folder_id(SHARED_FOLDER_NAME)
+files = list_files(FOLDER_ID)
+file_names = [f['name'] for f in files]
+selected_file = st.selectbox("Select a file", file_names)
 
-if folder_id:
-    files = list_files(folder_id)
-    file_names = [f['name'] for f in files]
-    selected_file = st.selectbox("Select a file", file_names)
+if st.button("Generate Links"):
+    file_meta = next((f for f in files if f['name'] == selected_file), None)
+    file_path = download_file(file_meta['id'], selected_file)
 
-    if st.button("Generate Links"):
-        file_meta = next((f for f in files if f['name'] == selected_file), None)
-        file_path = download_file(file_meta['id'], selected_file)
+    if selected_file.endswith(".csv"):
+        df = pd.read_csv(file_path)
+    else:
+        df = pd.read_excel(file_path)
 
-        if selected_file.endswith(".csv"):
-            df = pd.read_csv(file_path)
-        else:
-            df = pd.read_excel(file_path)
+    if 'Location Name' not in df.columns:
+        st.error("❌ File must contain 'Location Name' column.")
+    else:
+        df['Google Maps Link'] = df['Location Name'].apply(generate_link)
+        st.success("✅ Links generated!")
+        st.dataframe(df.head())
 
-        if 'Location Name' not in df.columns:
-            st.error("❌ File must contain 'Location Name' column.")
-        else:
-            df['Google Maps Link'] = df['Location Name'].apply(generate_link)
-            st.success("✅ Links generated!")
-            st.dataframe(df.head())
-
-            uploaded_id = upload_to_drive(df, selected_file.split('.')[0], folder_id)
-            st.success(f"✅ Uploaded updated file to Drive (file ID: {uploaded_id})")
+        uploaded_id = upload_to_drive(df, selected_file.split('.')[0], FOLDER_ID)
+        st.success(f"✅ Uploaded updated file to Drive (file ID: {uploaded_id})")
